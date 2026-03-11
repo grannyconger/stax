@@ -1,7 +1,6 @@
 // ============================================================
 //  $tax Hall of Fame — app.js
 //  Fetches directly from Google Sheets API v4
-//  No Apps Script, no CORS issues
 // ============================================================
 
 'use strict';
@@ -15,8 +14,24 @@ let uniqueGamesGlobal = [];
 let currentSortMode   = 'networth';
 let roiChartInstance  = null;
 let btmChartInstance  = null;
+let dedupEnabled      = true; // default: best score only per student
 
 const COMP_INV = 214657.66;
+
+// Sentinel value for "Best of 2026 Season" team view
+const BEST_2026_SENTINEL  = 'BEST_OF_2026_SEASON';
+const BEST_2026_START     = new Date('2026-01-01T00:00:00');
+const BEST_2026_END       = new Date('2026-06-01T23:59:59');
+
+// BTM chart: only these three 2026 classes (all screen sizes)
+const BTM_2026_CLASSES = [
+  '1a pf 2025-26 (weaver)',
+  '2a pf 2025-26 (weaver)',
+  '4b pf 2025-26 (weaver)'
+];
+
+// Game Analytics table: only 2026 school year
+const GAME_2026_KEYWORD = '2025-26';
 
 const ROI_BRACKETS = [
   { label: 'Lost Money', min: -Infinity, max: 0   },
@@ -24,13 +39,6 @@ const ROI_BRACKETS = [
   { label: '25 – 50%',  min: 25,        max: 50  },
   { label: '50 – 100%', min: 50,        max: 100 },
   { label: '100%+',     min: 100,       max: Infinity }
-];
-
-const YEAR_COHORTS = [
-  { label: '2023', keywords: ['2022-23'] },
-  { label: '2024', keywords: ['2023-24'] },
-  { label: '2025', keywords: ['2024-25'] },
-  { label: '2026', keywords: ['2025-26'] }
 ];
 
 const CLASS_MAP = {
@@ -43,12 +51,12 @@ const CLASS_MAP = {
   "4A PF 2024-25":             "2025 4A",
   "4B PF 2024-25":             "2025 4B",
   "2A MKT 2024-25":            "2025 Marketing",
-  "1A PF 2025-26 (Weaver)":    "2026 1A",
-  "2A PF 2025-26 (Weaver)":    "2026 2A",
-  "4B PF 2025-26 (Weaver)":    "2026 4B",
-  "3A PF 2025-26 (Robinson)":  "2026 3A",
-  "4A PF 2025-26 (Robinson)":  "2026 4A",
-  "2B PF 2025-26 (Robinson)":  "2026 2B"
+  "1A PF 2025-26 (Weaver)":   "2026 1A",
+  "2A PF 2025-26 (Weaver)":   "2026 2A",
+  "4B PF 2025-26 (Weaver)":   "2026 4B",
+  "3A PF 2025-26 (Robinson)": "2026 3A",
+  "4A PF 2025-26 (Robinson)": "2026 4A",
+  "2B PF 2025-26 (Robinson)": "2026 2B"
 };
 
 const CUSTOM_VIEWS = [
@@ -79,6 +87,8 @@ const CUSTOM_VIEWS = [
 //  Bootstrap
 // ============================================================
 window.addEventListener('DOMContentLoaded', function () {
+  injectStyles();
+
   var url = 'https://sheets.googleapis.com/v4/spreadsheets/'
     + CONFIG.SHEET_ID
     + '/values/'
@@ -96,13 +106,85 @@ window.addEventListener('DOMContentLoaded', function () {
       initializeDashboard(records);
     })
     .catch(function (err) {
-      showError('Could not load data. ' + err.message + ' — Make sure the sheet is set to "Anyone with the link can view" and the Google Sheets API is enabled.');
+      showError('Could not load data. ' + err.message
+        + ' — Make sure the sheet is set to "Anyone with the link can view" and the Google Sheets API is enabled.');
     });
 });
 
 
 // ============================================================
-//  Parse raw Sheets API rows into record objects
+//  Inject CSS — no index.html edits needed
+// ============================================================
+function injectStyles() {
+  var style = document.createElement('style');
+  style.textContent = [
+    // --- Wealth gap / large number overflow fix on mobile ---
+    '@media (max-width: 767px) {',
+    '  .game-stat { font-size: clamp(1.3rem, 5.5vw, 3rem) !important; word-break: break-word; }',
+
+    // --- Stacked mobile table layout ---
+    '  table.mobile-stack thead { display: none; }',
+    '  table.mobile-stack tbody tr {',
+    '    display: block;',
+    '    margin-bottom: 12px;',
+    '    border: 1px solid rgba(212,175,55,0.25);',
+    '    border-radius: 4px;',
+    '    overflow: hidden;',
+    '  }',
+    '  table.mobile-stack tbody td {',
+    '    display: flex !important;',
+    '    justify-content: space-between;',
+    '    align-items: center;',
+    '    padding: 10px 14px !important;',
+    '    border-bottom: 1px solid rgba(212,175,55,0.12) !important;',
+    '    transform: none !important;',
+    '    text-align: right;',
+    '  }',
+    '  table.mobile-stack tbody td:last-child { border-bottom: none !important; }',
+    '  table.mobile-stack tbody td::before {',
+    '    content: attr(data-label);',
+    '    font-size: 0.65rem;',
+    '    text-transform: uppercase;',
+    '    letter-spacing: 1px;',
+    '    font-weight: 700;',
+    '    color: rgba(212,175,55,0.7);',
+    '    margin-right: 12px;',
+    '    flex-shrink: 0;',
+    '    text-align: left;',
+    '  }',
+    // Disable row scale transform on mobile (breaks stacked layout)
+    '  .table-hover tbody tr:hover td { transform: none !important; }',
+    '}',
+
+    // --- Dedup toggle styling (all screen sizes) ---
+    '.dedup-toggle-wrap {',
+    '  display: flex;',
+    '  align-items: center;',
+    '  gap: 10px;',
+    '  background: rgba(212,175,55,0.1);',
+    '  border: 1px solid rgba(212,175,55,0.3);',
+    '  border-radius: 4px;',
+    '  padding: 8px 14px;',
+    '}',
+    '.dedup-toggle-wrap .form-check-label {',
+    '  font-size: 0.78rem;',
+    '  font-weight: 700;',
+    '  text-transform: uppercase;',
+    '  letter-spacing: 1px;',
+    '  color: var(--olive-dark);',
+    '  cursor: pointer;',
+    '  margin: 0;',
+    '  white-space: nowrap;',
+    '}',
+    '.form-check-input:checked { background-color: var(--gold) !important; border-color: var(--gold-dark) !important; }'
+  ].join('\n');
+
+  document.head.appendChild(style);
+}
+
+
+// ============================================================
+//  Parse raw Sheets API rows → record objects
 // ============================================================
 function parseSheetData(rows) {
   if (!rows || rows.length < 2) return [];
@@ -115,13 +197,13 @@ function parseSheetData(rows) {
   var cIdx    = headers.indexOf("class period");
   var pIdx    = headers.indexOf("portfolio value");
   var hIdx    = headers.indexOf("your highest performer");
-  var tiIdx   = headers.findIndex(function(h){ return h.includes("total invest"); });
-  var lpIdx   = headers.findIndex(function(h){ return h.includes("lowest performer"); });
-  var bmIdx   = headers.findIndex(function(h){ return h.includes("beat the market"); });
-  var cnIdx   = headers.findIndex(function(h){ return h.includes("computer"); });
-  var teamIdx = headers.findIndex(function(h){ return h.includes("team name"); });
-  var expIdx  = headers.findIndex(function(h){ return h.includes("expenses") || h.includes("life event"); });
-  var trIdx   = headers.findIndex(function(h){ return h.includes("total return"); });
+  var tiIdx   = headers.findIndex(function (h) { return h.includes("total invest"); });
+  var lpIdx   = headers.findIndex(function (h) { return h.includes("lowest performer"); });
+  var bmIdx   = headers.findIndex(function (h) { return h.includes("beat the market"); });
+  var cnIdx   = headers.findIndex(function (h) { return h.includes("computer"); });
+  var teamIdx = headers.findIndex(function (h) { return h.includes("team name"); });
+  var expIdx  = headers.findIndex(function (h) { return h.includes("expenses") || h.includes("life event"); });
+  var trIdx   = headers.findIndex(function (h) { return h.includes("total return"); });
 
   if (fIdx === -1 || pIdx === -1) {
     showError('Could not find required columns. Found: ' + headers.join(' | '));
@@ -129,39 +211,35 @@ function parseSheetData(rows) {
   }
 
   var records = [];
-
   for (var i = 1; i < rows.length; i++) {
-    var row = rows[i];
-    var getName = function(idx) { return idx > -1 && row[idx] ? String(row[idx]).trim() : ''; };
-
-    var fName = getName(fIdx);
-    var lName = getName(lIdx);
+    var row  = rows[i];
+    var get  = function (idx) { return idx > -1 && row[idx] ? String(row[idx]).trim() : ''; };
+    var fName = get(fIdx);
+    var lName = get(lIdx);
     if (!fName) continue;
-
-    var pVal = getName(pIdx);
+    var pVal  = get(pIdx);
     if (!pVal) continue;
 
     var rawClass    = cIdx > -1 ? String(row[cIdx] || 'Unknown').trim() : 'Unknown';
     var mappedClass = CLASS_MAP[rawClass] ? CLASS_MAP[rawClass] : rawClass;
 
     records.push({
-      timestamp:              tIdx    > -1 ? getName(tIdx)    : '',
-      fullName:               (fName + ' ' + lName).trim(),
+      timestamp:              get(tIdx),
+      fullName:               toTitleCase((fName + ' ' + lName).trim()),
       classPeriod:            mappedClass,
       rawClassPeriod:         rawClass,
       portfolioValue:         pVal,
-      totalInvested:          tiIdx   > -1 ? getName(tiIdx)   : 'N/A',
-      expensesFromLifeEvents: expIdx  > -1 ? getName(expIdx)  : 'N/A',
-      totalReturn:            trIdx   > -1 ? getName(trIdx)   : 'N/A',
-      highestPerformer:       hIdx    > -1 ? getName(hIdx)    : 'None',
-      lowestPerformer:        lpIdx   > -1 ? getName(lpIdx)   : 'None',
-      beatMarket:             bmIdx   > -1 ? getName(bmIdx)   : 'No',
-      computerNetWorth:       cnIdx   > -1 ? getName(cnIdx)   : 'N/A',
-      teamName:               teamIdx > -1 ? getName(teamIdx) : 'No Team'
+      totalInvested:          tiIdx   > -1 ? get(tiIdx)   : 'N/A',
+      expensesFromLifeEvents: expIdx  > -1 ? get(expIdx)  : 'N/A',
+      totalReturn:            trIdx   > -1 ? get(trIdx)   : 'N/A',
+      highestPerformer:       hIdx    > -1 ? get(hIdx)    : 'None',
+      lowestPerformer:        lpIdx   > -1 ? get(lpIdx)   : 'None',
+      beatMarket:             bmIdx   > -1 ? get(bmIdx)   : 'No',
+      computerNetWorth:       cnIdx   > -1 ? get(cnIdx)   : 'N/A',
+      teamName:               teamIdx > -1 ? get(teamIdx) : 'No Team'
       // email intentionally omitted
     });
   }
-
   return records;
 }
 
@@ -196,13 +274,17 @@ function formatDate(ts) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+function toTitleCase(str) {
+  return String(str || '').toLowerCase().replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+}
+
 function escHtml(str) {
   return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/&/g,  '&amp;')
+    .replace(/</g,  '&lt;')
+    .replace(/>/g,  '&gt;')
+    .replace(/"/g,  '&quot;')
+    .replace(/'/g,  '&#39;');
 }
 
 
@@ -211,7 +293,7 @@ function escHtml(str) {
 // ============================================================
 function initializeDashboard(records) {
   if (!records || records.length === 0) {
-    showError('No records found in the Reflections sheet. Make sure the sheet has data and the tab is named exactly "Reflections".');
+    showError('No records found in the Reflections sheet. Check that the sheet is shared and the tab is named exactly "Reflections".');
     return;
   }
 
@@ -247,7 +329,7 @@ function initializeDashboard(records) {
       ? ((row.numericValue - row.totalInvestedNumeric) / row.totalInvestedNumeric) * 100
       : 0;
 
-    var stRatio    = row.totalInvestedNumeric > 0 ? (row.numericValue / row.totalInvestedNumeric) : 1;
+    var stRatio     = row.totalInvestedNumeric > 0 ? (row.numericValue / row.totalInvestedNumeric) : 1;
     row.studentCAGR = stRatio > 0 ? (Math.pow(stRatio, 1 / 20) - 1) * 100 : 0;
 
     var compPort      = safeNum(row.computerNetWorth);
@@ -264,13 +346,65 @@ function initializeDashboard(records) {
       : 'none';
   });
 
+  // Add mobile-stack class to data tables
+  var tableTargets = ['leaderboardBody', 'gameLeaderboardBody', 'teamLeaderboardBody'];
+  tableTargets.forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) {
+      var tbl = el.closest('table');
+      if (tbl) tbl.classList.add('mobile-stack');
+    }
+  });
+
   populateDropdowns();
+  injectDedupToggle();
   updateLeaderboard();
   renderGameView();
   renderTeamView();
 
-  var tooltipEls = document.querySelectorAll('[data-bs-toggle="tooltip"]');
-  tooltipEls.forEach(function (el) { new bootstrap.Tooltip(el); });
+  // Bootstrap tooltips
+  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function (el) {
+    new bootstrap.Tooltip(el);
+  });
+}
+
+
+// ============================================================
+//  Dedup Toggle — injected into the investors sort bar
+// ============================================================
+function injectDedupToggle() {
+  // Find the sort bar row in indivView
+  var sortBar = document.querySelector('#indivView .d-flex.flex-column.flex-lg-row');
+  if (!sortBar || document.getElementById('dedupToggle')) return; // already injected
+
+  var wrap = document.createElement('div');
+  wrap.className = 'dedup-toggle-wrap mt-3 mt-lg-0';
+  wrap.innerHTML = ''
+    + '<div class="form-check form-switch mb-0">'
+    + '  <input class="form-check-input" type="checkbox" id="dedupToggle" checked>'
+    + '  <label class="form-check-label" for="dedupToggle">Best Score Only</label>'
+    + '</div>';
+  sortBar.appendChild(wrap);
+
+  document.getElementById('dedupToggle').addEventListener('change', function () {
+    dedupEnabled = this.checked;
+    updateLeaderboard();
+  });
+}
+
+
+// ============================================================
+//  Deduplication — one entry per student, highest portfolio
+// ============================================================
+function deduplicateRecords(records) {
+  var best = {};
+  records.forEach(function (r) {
+    var key = r.fullName.trim().toLowerCase();
+    if (!best[key] || r.numericValue > best[key].numericValue) {
+      best[key] = r;
+    }
+  });
+  return Object.values(best);
 }
 
 
@@ -284,7 +418,6 @@ function switchTab(tab) {
     if (view) view.style.display = 'none';
     if (btn)  btn.classList.remove('active');
   });
-
   var activeView = document.getElementById(tab === 'indiv' ? 'indivView' : tab === 'game' ? 'gameView' : 'teamView');
   var activeBtn  = document.getElementById(tab === 'indiv' ? 'tabIndiv'  : tab === 'game' ? 'tabGame'  : 'tabTeam');
   if (activeView) activeView.style.display = 'block';
@@ -296,33 +429,33 @@ function switchTab(tab) {
 //  Populate Dropdowns
 // ============================================================
 function populateDropdowns() {
+  // --- Investors dropdown ---
   var selectIndiv = document.getElementById('classFilter');
-  if (!selectIndiv) return;
-  selectIndiv.innerHTML = '';
+  if (selectIndiv) {
+    selectIndiv.innerHTML = '';
+    var exactOrder = [
+      'ALL TIME RECORDS',
+      'BEST OF 2026', '2026 1A', '2026 2A', '2026 3A', '2026 4A', '2026 2B', '2026 4B',
+      'TOP SAVINGS ACCOUNT', 'TOP CERTIFICATE OF DEPOSIT', 'TOP INDEX FUND',
+      'TOP INDIVIDUAL STOCKS', 'TOP GOVERNMENT BONDS', 'TOP CROP COMMODITY', 'TOP GOLD',
+      'BEST OF 2025', '2025 3A', '2025 4A', '2025 4B', '2025 Marketing',
+      'BEST OF 2024', '2024 4A', '2024 3B', '2024 4B',
+      'BEST OF 2023', '2023 2A', '2023 4B'
+    ];
+    exactOrder.forEach(function (viewName) {
+      var opt     = document.createElement('option');
+      var isCustom = CUSTOM_VIEWS.some(function (v) { return v.name === viewName; });
+      if (viewName === 'ALL TIME RECORDS') {
+        opt.value = 'ALL TIME'; opt.textContent = '🏆 ALL TIME RECORDS';
+      } else {
+        opt.value       = isCustom ? 'CUSTOM_' + viewName : viewName;
+        opt.textContent = viewName.includes('BEST OF') ? '⭐ ' + viewName : viewName;
+      }
+      selectIndiv.appendChild(opt);
+    });
+  }
 
-  var exactOrder = [
-    'ALL TIME RECORDS',
-    'BEST OF 2026', '2026 1A', '2026 2A', '2026 3A', '2026 4A', '2026 2B', '2026 4B',
-    'TOP SAVINGS ACCOUNT', 'TOP CERTIFICATE OF DEPOSIT', 'TOP INDEX FUND',
-    'TOP INDIVIDUAL STOCKS', 'TOP GOVERNMENT BONDS', 'TOP CROP COMMODITY', 'TOP GOLD',
-    'BEST OF 2025', '2025 3A', '2025 4A', '2025 4B', '2025 Marketing',
-    'BEST OF 2024', '2024 4A', '2024 3B', '2024 4B',
-    'BEST OF 2023', '2023 2A', '2023 4B'
-  ];
-
-  exactOrder.forEach(function (viewName) {
-    var opt = document.createElement('option');
-    if (viewName === 'ALL TIME RECORDS') {
-      opt.value       = 'ALL TIME';
-      opt.textContent = '🏆 ALL TIME RECORDS';
-    } else {
-      var isCustom    = CUSTOM_VIEWS.some(function (v) { return v.name === viewName; });
-      opt.value       = isCustom ? 'CUSTOM_' + viewName : viewName;
-      opt.textContent = viewName.includes('BEST OF') ? '⭐ ' + viewName : viewName;
-    }
-    selectIndiv.appendChild(opt);
-  });
-
+  // --- Team / Game dropdown ---
   var validGameSet = new Set();
   allData.forEach(function (r) {
     if (r.teamMatchKey !== 'none' && r.timestamp) {
@@ -341,9 +474,16 @@ function populateDropdowns() {
   var selectGame = document.getElementById('gameFilter');
   if (selectGame) {
     selectGame.innerHTML = '';
+
+    // "Best of 2026 Season" at the top
+    var bestOpt = document.createElement('option');
+    bestOpt.value       = BEST_2026_SENTINEL;
+    bestOpt.textContent = '⭐ BEST OF 2026 (Season)';
+    selectGame.appendChild(bestOpt);
+
     if (uniqueGamesGlobal.length === 0) {
-      var emptyOpt       = document.createElement('option');
-      emptyOpt.textContent = 'No team games found';
+      var emptyOpt = document.createElement('option');
+      emptyOpt.textContent = 'No individual team games found';
       selectGame.appendChild(emptyOpt);
     } else {
       uniqueGamesGlobal.forEach(function (g) {
@@ -357,17 +497,17 @@ function populateDropdowns() {
 
 
 // ============================================================
-//  Asset Badge
+//  Asset Helpers
 // ============================================================
 function getAssetBadgeClass(asset) {
   var a = String(asset || '').toLowerCase();
-  if (a.includes('stocks'))                        return 'asset-stocks';
-  if (a.includes('index'))                         return 'asset-index';
-  if (a.includes('savings'))                       return 'asset-savings';
+  if (a.includes('stocks'))                          return 'asset-stocks';
+  if (a.includes('index'))                           return 'asset-index';
+  if (a.includes('savings'))                         return 'asset-savings';
   if (a.includes('cd') || a.includes('certificate')) return 'asset-cd';
-  if (a.includes('bonds'))                         return 'asset-bonds';
-  if (a.includes('crop'))                          return 'asset-crop';
-  if (a.includes('gold'))                          return 'asset-gold';
+  if (a.includes('bonds'))                           return 'asset-bonds';
+  if (a.includes('crop'))                            return 'asset-crop';
+  if (a.includes('gold'))                            return 'asset-gold';
   return 'asset-na';
 }
 
@@ -387,25 +527,22 @@ function setSortMode(mode) {
 
 
 // ============================================================
-//  Filter Records
+//  Filter Records for Investor Dropdown
 // ============================================================
 function getFilteredRecords(filterValue) {
   var fv = String(filterValue || '').trim();
-
   if (fv === 'ALL TIME') return allData.slice();
 
   if (fv.startsWith('CUSTOM_')) {
     var viewName = fv.replace('CUSTOM_', '');
     var view     = CUSTOM_VIEWS.find(function (v) { return v.name === viewName; });
     if (!view) return [];
-
     if (view.performer) {
       var perf = view.performer.toLowerCase();
       return allData.filter(function (r) {
         return String(r.highestPerformer || '').toLowerCase().includes(perf);
       });
     }
-
     if (view.periods && view.periods.length > 0) {
       return allData.filter(function (r) {
         return view.periods.includes(String(r.rawClassPeriod || '').toLowerCase());
@@ -438,6 +575,11 @@ function updateLeaderboard() {
   var searchTerm  = searchEl ? searchEl.value.trim().toLowerCase() : '';
 
   var filtered = getFilteredRecords(filterValue);
+
+  // Apply dedup before search so search works on the deduped set
+  if (dedupEnabled) {
+    filtered = deduplicateRecords(filtered);
+  }
 
   if (searchTerm) {
     filtered = filtered.filter(function (r) {
@@ -472,13 +614,13 @@ function updateLeaderboard() {
     var delay      = Math.min(idx * 40, 800);
     var idxJson    = escHtml(JSON.stringify(allDataIndexes));
 
-    html += '<tr class="animated-row" style="animation-delay:' + delay + 'ms" onclick="openPlayerModal(' + idx + ', ' + idxJson + ')">';
-    html += '<td class="rank-col">' + medal + '</td>';
-    html += '<td><strong>' + escHtml(row.fullName) + '</strong>' + star + '</td>';
-    html += '<td>' + escHtml(row.classPeriod) + '</td>';
-    html += '<td><span class="currency">' + formatCurrency(row.numericValue) + '</span><br><small style="color:' + roiColor + ';font-weight:700;">' + row.roi.toFixed(1) + '% ROI</small></td>';
-    html += '<td><span class="badge ' + badgeClass + '">' + escHtml(assetLabel) + '</span></td>';
-    html += '<td><small>' + formatDate(row.timestamp) + '</small></td>';
+    html += '<tr class="animated-row" style="animation-delay:' + delay + 'ms" onclick="openPlayerModal(' + idx + ',' + idxJson + ')">';
+    html += '<td data-label="Rank" class="rank-col">' + medal + '</td>';
+    html += '<td data-label="Investor"><strong>' + escHtml(row.fullName) + '</strong>' + star + '</td>';
+    html += '<td data-label="Period">' + escHtml(row.classPeriod) + '</td>';
+    html += '<td data-label="Portfolio / ROI"><span class="currency">' + formatCurrency(row.numericValue) + '</span><br><small style="color:' + roiColor + ';font-weight:700;">' + row.roi.toFixed(1) + '% ROI</small></td>';
+    html += '<td data-label="Top Asset"><span class="badge ' + badgeClass + '">' + escHtml(assetLabel) + '</span></td>';
+    html += '<td data-label="Date"><small>' + formatDate(row.timestamp) + '</small></td>';
     html += '</tr>';
   });
 
@@ -495,26 +637,22 @@ function updateIndivStats(filtered) {
       avgEl.textContent = formatCurrency(sum / filtered.length);
     }
   }
-
   var highEl = document.getElementById('statTopHigh');
   if (highEl) highEl.textContent = getMostCommonAsset(filtered, 'highestPerformer');
-
-  var lowEl = document.getElementById('statTopLow');
-  if (lowEl) lowEl.textContent = getMostCommonAsset(filtered, 'lowestPerformer');
+  var lowEl  = document.getElementById('statTopLow');
+  if (lowEl)  lowEl.textContent  = getMostCommonAsset(filtered, 'lowestPerformer');
 }
 
 function getMostCommonAsset(records, field) {
   var counts = {};
   records.forEach(function (r) {
     var val = String(r[field] || '').trim().toLowerCase();
-    if (val && val !== 'none' && val !== 'n/a') {
-      counts[val] = (counts[val] || 0) + 1;
-    }
+    if (val && val !== 'none' && val !== 'n/a') counts[val] = (counts[val] || 0) + 1;
   });
   var keys = Object.keys(counts);
   if (keys.length === 0) return '--';
   keys.sort(function (a, b) { return counts[b] - counts[a]; });
-  return keys[0].replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  return toTitleCase(keys[0]);
 }
 
 
@@ -530,9 +668,9 @@ function openPlayerModal(filteredIdx, allDataIndexes) {
 
   set('modalName',        row.fullName);
   set('modalPortfolio',   formatCurrency(row.numericValue));
-  set('modalInvested',    row.totalInvestedNumeric  > 0 ? formatCurrency(row.totalInvestedNumeric)  : 'N/A');
-  set('modalExpenses',    row.expensesNumeric        > 0 ? formatCurrency(row.expensesNumeric)        : 'N/A');
-  set('modalTotalReturn', row.totalReturnNumeric    !== 0 ? formatCurrency(row.totalReturnNumeric)   : 'N/A');
+  set('modalInvested',    row.totalInvestedNumeric  > 0  ? formatCurrency(row.totalInvestedNumeric)  : 'N/A');
+  set('modalExpenses',    row.expensesNumeric        > 0  ? formatCurrency(row.expensesNumeric)        : 'N/A');
+  set('modalTotalReturn', row.totalReturnNumeric    !== 0 ? formatCurrency(row.totalReturnNumeric)    : 'N/A');
 
   var roiEl = document.getElementById('modalROI');
   if (roiEl) { roiEl.textContent = row.roi.toFixed(2) + '%'; roiEl.style.color = row.roi >= 0 ? '#27ae60' : '#e74c3c'; }
@@ -578,21 +716,21 @@ function renderGameView() {
 }
 
 function renderGlobalStats() {
+  // Win rate — 2026 cohort only
   var cohort2026 = allData.filter(function (r) {
     return String(r.rawClassPeriod || '').toLowerCase().includes('2025-26');
   });
-
   var winRateEl = document.getElementById('gameStatWinRate');
   if (winRateEl) {
     if (cohort2026.length === 0) {
       winRateEl.textContent = 'N/A';
     } else {
       var winners = cohort2026.filter(function (r) { return r.beatMarketBool; }).length;
-      var pct     = (winners / cohort2026.length) * 100;
-      winRateEl.innerHTML = '<span class="win-rate-pulse">' + pct.toFixed(1) + '%</span>';
+      winRateEl.innerHTML = '<span class="win-rate-pulse">' + ((winners / cohort2026.length) * 100).toFixed(1) + '%</span>';
     }
   }
 
+  // Overall top 3 — all time
   var sorted    = allData.slice().sort(function (a, b) { return b.numericValue - a.numericValue; });
   var overallEl = document.getElementById('gameStatOverall');
   if (overallEl) {
@@ -608,15 +746,16 @@ function renderGlobalStats() {
     }
   }
 
-  var gapEl    = document.getElementById('gameStatGap');
+  // Largest wealth gap — all time, within a single class period
+  var gapEl   = document.getElementById('gameStatGap');
   if (gapEl) {
-    var maxGap   = 0;
-    var periodMap = {};
+    var maxGap  = 0;
+    var pm      = {};
     allData.forEach(function (r) {
-      if (!periodMap[r.classPeriod]) periodMap[r.classPeriod] = [];
-      periodMap[r.classPeriod].push(r.numericValue);
+      if (!pm[r.classPeriod]) pm[r.classPeriod] = [];
+      pm[r.classPeriod].push(r.numericValue);
     });
-    Object.values(periodMap).forEach(function (vals) {
+    Object.values(pm).forEach(function (vals) {
       if (vals.length < 2) return;
       var gap = Math.max.apply(null, vals) - Math.min.apply(null, vals);
       if (gap > maxGap) maxGap = gap;
@@ -625,9 +764,15 @@ function renderGlobalStats() {
   }
 }
 
+// ---- Game leaderboard: 2026 only ----
 function renderGameLeaderboard() {
+  // Filter to 2026 school year classes only
+  var data2026 = allData.filter(function (r) {
+    return String(r.rawClassPeriod || '').toLowerCase().includes(GAME_2026_KEYWORD);
+  });
+
   var periodMap = {};
-  allData.forEach(function (r) {
+  data2026.forEach(function (r) {
     var key = r.classPeriod || 'Unknown';
     if (!periodMap[key]) periodMap[key] = [];
     periodMap[key].push(r);
@@ -652,7 +797,7 @@ function renderGameLeaderboard() {
   if (!tbody) return;
 
   if (games.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No game data found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No 2026 game data found.</td></tr>';
     return;
   }
 
@@ -663,13 +808,13 @@ function renderGameLeaderboard() {
     var roiColor = g.avgROI  >= 0  ? '#2ecc71' : '#e74c3c';
     var winColor = g.winRate >= 50 ? '#2ecc71' : '#e74c3c';
     html += '<tr onclick="openGameModal(\'' + escHtml(g.period) + '\')">';
-    html += '<td class="rank-col">' + medal + '</td>';
-    html += '<td><strong>' + escHtml(g.period) + '</strong></td>';
-    html += '<td><small>' + escHtml(g.dateStr) + '</small></td>';
-    html += '<td>' + g.players + '</td>';
-    html += '<td style="color:' + winColor + ';font-weight:700;">' + g.winRate.toFixed(1) + '%</td>';
-    html += '<td style="color:' + roiColor + ';font-weight:700;">' + g.avgROI.toFixed(1) + '%</td>';
-    html += '<td class="currency">' + formatCurrency(g.gap) + '</td>';
+    html += '<td data-label="Rank" class="rank-col">' + medal + '</td>';
+    html += '<td data-label="Game"><strong>' + escHtml(g.period) + '</strong></td>';
+    html += '<td data-label="Date"><small>' + escHtml(g.dateStr) + '</small></td>';
+    html += '<td data-label="Players">' + g.players + '</td>';
+    html += '<td data-label="Win Rate" style="color:' + winColor + ';font-weight:700;">' + g.winRate.toFixed(1) + '%</td>';
+    html += '<td data-label="Avg ROI" style="color:' + roiColor + ';font-weight:700;">' + g.avgROI.toFixed(1) + '%</td>';
+    html += '<td data-label="Wealth Gap" class="currency">' + formatCurrency(g.gap) + '</td>';
     html += '</tr>';
   });
   tbody.innerHTML = html;
@@ -677,7 +822,7 @@ function renderGameLeaderboard() {
 
 
 // ============================================================
-//  ROI Distribution Chart
+//  ROI Distribution Chart — all time
 // ============================================================
 function renderROIChart() {
   var canvas = document.getElementById('roiChart');
@@ -691,17 +836,11 @@ function renderROIChart() {
     if (r.totalInvestedNumeric <= 0) return;
     valid++;
     for (var i = 0; i < ROI_BRACKETS.length; i++) {
-      if (r.roi >= ROI_BRACKETS[i].min && r.roi < ROI_BRACKETS[i].max) {
-        counts[i]++;
-        break;
-      }
+      if (r.roi >= ROI_BRACKETS[i].min && r.roi < ROI_BRACKETS[i].max) { counts[i]++; break; }
     }
   });
 
-  if (valid === 0) {
-    wrap.innerHTML = '<div class="chart-empty">Not enough data to display this chart.</div>';
-    return;
-  }
+  if (valid === 0) { wrap.innerHTML = '<div class="chart-empty">Not enough data to display this chart.</div>'; return; }
 
   if (roiChartInstance) { roiChartInstance.destroy(); roiChartInstance = null; }
 
@@ -714,30 +853,23 @@ function renderROIChart() {
         data: counts,
         backgroundColor: ['#e74c3c','#e8a838','#ebd186','#9ab0a6','#d4af37'],
         borderColor:     ['#c0392b','#c47d10','#cbb36b','#7d9389','#a88a2c'],
-        borderWidth: 2,
-        borderRadius: 3
+        borderWidth: 2, borderRadius: 3
       }]
     },
     options: {
       responsive: true,
       plugins: {
         legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: function (ctx) {
-              var pct = valid > 0 ? ((ctx.parsed.y / valid) * 100).toFixed(1) : '0';
-              return ctx.parsed.y + ' students (' + pct + '%)';
-            }
-          }
-        }
+        tooltip: { callbacks: { label: function (ctx) {
+          var pct = valid > 0 ? ((ctx.parsed.y / valid) * 100).toFixed(1) : '0';
+          return ctx.parsed.y + ' students (' + pct + '%)';
+        }}}
       },
       scales: {
         x: { ticks: { color: '#f4f1ea', font: { family: 'Montserrat', weight: '600' } }, grid: { color: 'rgba(212,175,55,0.15)' } },
-        y: {
-          beginAtZero: true,
+        y: { beginAtZero: true,
           ticks: { color: '#f4f1ea', font: { family: 'Montserrat' }, stepSize: 1, callback: function (v) { return Number.isInteger(v) ? v : ''; } },
-          grid: { color: 'rgba(212,175,55,0.15)' }
-        }
+          grid: { color: 'rgba(212,175,55,0.15)' } }
       }
     }
   });
@@ -745,60 +877,55 @@ function renderROIChart() {
 
 
 // ============================================================
-//  Beat the Market Trend Chart
+//  Beat the Market Chart — 2026 only, 1A / 2A / 4B (Weaver)
 // ============================================================
 function renderBTMChart() {
   var canvas = document.getElementById('btmChart');
   var wrap   = document.getElementById('btmChartWrap');
   if (!canvas || !wrap) return;
 
-  var labels   = [];
-  var winRates = [];
-
-  YEAR_COHORTS.forEach(function (cohort) {
-    var players = allData.filter(function (r) {
-      var rcp = String(r.rawClassPeriod || '').toLowerCase();
-      return cohort.keywords.some(function (k) { return rcp.includes(k); });
-    });
-    if (players.length === 0) return;
-    var winners = players.filter(function (r) { return r.beatMarketBool; }).length;
-    labels.push(cohort.label);
-    winRates.push(parseFloat(((winners / players.length) * 100).toFixed(1)));
+  var players = allData.filter(function (r) {
+    return BTM_2026_CLASSES.includes(String(r.rawClassPeriod || '').toLowerCase());
   });
 
-  if (labels.length === 0) {
-    wrap.innerHTML = '<div class="chart-empty">Not enough data across cohorts to display this chart.</div>';
+  if (players.length === 0) {
+    wrap.innerHTML = '<div class="chart-empty">No 2026 data found for Periods 1A, 2A & 4B.</div>';
     return;
   }
+
+  var winners  = players.filter(function (r) { return r.beatMarketBool; }).length;
+  var winRate  = parseFloat(((winners / players.length) * 100).toFixed(1));
+  var barColor = winRate >= 50 ? 'rgba(46,204,113,0.75)' : 'rgba(212,175,55,0.75)';
+  var barBorder= winRate >= 50 ? '#27ae60' : '#a88a2c';
 
   if (btmChartInstance) { btmChartInstance.destroy(); btmChartInstance = null; }
 
   btmChartInstance = new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: labels,
+      labels: ['2026 — Periods 1A, 2A & 4B'],
       datasets: [{
         label: 'Beat the Market %',
-        data: winRates,
-        backgroundColor: winRates.map(function (v) { return v >= 50 ? 'rgba(46,204,113,0.75)' : 'rgba(212,175,55,0.75)'; }),
-        borderColor:     winRates.map(function (v) { return v >= 50 ? '#27ae60' : '#a88a2c'; }),
-        borderWidth: 2,
-        borderRadius: 3
+        data: [winRate],
+        backgroundColor: [barColor],
+        borderColor:     [barBorder],
+        borderWidth: 2, borderRadius: 3
       }]
     },
     options: {
       responsive: true,
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: { label: function (ctx) { return ctx.parsed.y + '% of students beat the market'; } } }
+        tooltip: { callbacks: { label: function (ctx) {
+          return ctx.parsed.y + '% of students beat the market ('
+            + winners + ' of ' + players.length + ')';
+        }}}
       },
       scales: {
         x: { ticks: { color: '#f4f1ea', font: { family: 'Montserrat', weight: '600' } }, grid: { color: 'rgba(212,175,55,0.15)' } },
-        y: {
-          beginAtZero: true, max: 100,
+        y: { beginAtZero: true, max: 100,
           ticks: { color: '#f4f1ea', font: { family: 'Montserrat' }, callback: function (v) { return v + '%'; } },
-          grid: { color: 'rgba(212,175,55,0.15)' }
-        }
+          grid: { color: 'rgba(212,175,55,0.15)' } }
       }
     }
   });
@@ -806,7 +933,7 @@ function renderBTMChart() {
 
 
 // ============================================================
-//  Game Modal
+//  Game Modal (roster for a class period)
 // ============================================================
 function openGameModal(period) {
   var players = allData.filter(function (r) { return r.classPeriod === period; });
@@ -832,7 +959,6 @@ function openGameModal(period) {
     });
     tbody.innerHTML = html;
   }
-
   bootstrap.Modal.getOrCreateInstance(document.getElementById('listModal')).show();
 }
 
@@ -842,14 +968,25 @@ function openGameModal(period) {
 // ============================================================
 function renderTeamView() {
   var gameFilterEl = document.getElementById('gameFilter');
-  if (!gameFilterEl || uniqueGamesGlobal.length === 0) {
-    var tbody = document.getElementById('teamLeaderboardBody');
+  var tbody        = document.getElementById('teamLeaderboardBody');
+
+  if (!gameFilterEl) {
     if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No team data found.</td></tr>';
     return;
   }
 
   var selectedGame = gameFilterEl.value;
-  if (!selectedGame) return;
+
+  // --- Best of 2026 Season aggregate ---
+  if (selectedGame === BEST_2026_SENTINEL) {
+    renderBestOf2026Teams();
+    return;
+  }
+
+  if (!selectedGame || uniqueGamesGlobal.length === 0) {
+    if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No team data found.</td></tr>';
+    return;
+  }
 
   var parts       = selectedGame.split(' | ');
   var gameDateStr = parts[0] ? parts[0].trim() : '';
@@ -862,6 +999,68 @@ function renderTeamView() {
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) === gameDateStr;
   });
 
+  renderTeamTable(gamePlayers, gamePeriod, gameDateStr);
+}
+
+// ---- Best of 2026 Season: aggregate all 2025-26 teams Jan 1 – Jun 1 2026 ----
+function renderBestOf2026Teams() {
+  var tbody = document.getElementById('teamLeaderboardBody');
+
+  // Filter records: 2025-26 school year, within date range, has a team
+  var seasonPlayers = allData.filter(function (r) {
+    if (r.teamMatchKey === 'none') return false;
+    if (!String(r.rawClassPeriod || '').toLowerCase().includes('2025-26')) return false;
+    var d = new Date(r.timestamp);
+    if (isNaN(d)) return false;
+    return d >= BEST_2026_START && d <= BEST_2026_END;
+  });
+
+  // Group by team name, then per team deduplicate by student (best score)
+  var teamMap = {};
+  seasonPlayers.forEach(function (r) {
+    if (!teamMap[r.teamMatchKey]) teamMap[r.teamMatchKey] = { displayName: r.teamName.trim(), members: {} };
+    var key = r.fullName.trim().toLowerCase();
+    if (!teamMap[r.teamMatchKey].members[key] || r.numericValue > teamMap[r.teamMatchKey].members[key].numericValue) {
+      teamMap[r.teamMatchKey].members[key] = r;
+    }
+  });
+
+  var teams = Object.values(teamMap).map(function (t) {
+    var memberList = Object.values(t.members);
+    var total      = memberList.reduce(function (s, r) { return s + r.numericValue; }, 0);
+    var average    = memberList.length > 0 ? total / memberList.length : 0;
+    return { displayName: t.displayName, members: memberList, average: average };
+  });
+
+  teams.sort(function (a, b) { return b.average - a.average; });
+
+  if (!tbody) return;
+
+  if (teams.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No team data found for the 2026 season.</td></tr>';
+    return;
+  }
+
+  var html = '';
+  teams.forEach(function (team, idx) {
+    var rank        = idx + 1;
+    var medal       = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank;
+    var memberNames = team.members
+      .slice().sort(function (a, b) { return b.numericValue - a.numericValue; })
+      .map(function (r) { return escHtml(r.fullName); }).join(', ');
+
+    html += '<tr onclick="openBestOf2026TeamModal(\'' + escHtml(team.displayName) + '\')">';
+    html += '<td data-label="Rank" class="rank-col">' + medal + '</td>';
+    html += '<td data-label="Team"><strong>' + escHtml(team.displayName) + '</strong></td>';
+    html += '<td data-label="Members"><small style="line-height:1.8;">' + memberNames + '</small></td>';
+    html += '<td data-label="Avg Portfolio"><span class="currency">' + formatCurrency(team.average) + '</span></td>';
+    html += '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+// ---- Single-game team table ----
+function renderTeamTable(gamePlayers, gamePeriod, gameDateStr) {
   var teamMap = {};
   gamePlayers.forEach(function (r) {
     if (r.teamMatchKey === 'none') return;
@@ -894,19 +1093,18 @@ function renderTeamView() {
       .map(function (r) { return escHtml(r.fullName); }).join(', ');
 
     html += '<tr onclick="openTeamModal(\'' + escHtml(team.displayName) + '\',\'' + escHtml(gamePeriod) + '\',\'' + escHtml(gameDateStr) + '\')">';
-    html += '<td class="rank-col">' + medal + '</td>';
-    html += '<td><strong>' + escHtml(team.displayName) + '</strong></td>';
-    html += '<td><small style="line-height:1.8;">' + memberNames + '</small></td>';
-    html += '<td><span class="currency">' + formatCurrency(team.average) + '</span></td>';
+    html += '<td data-label="Rank" class="rank-col">' + medal + '</td>';
+    html += '<td data-label="Team"><strong>' + escHtml(team.displayName) + '</strong></td>';
+    html += '<td data-label="Members"><small style="line-height:1.8;">' + memberNames + '</small></td>';
+    html += '<td data-label="Avg Portfolio"><span class="currency">' + formatCurrency(team.average) + '</span></td>';
     html += '</tr>';
   });
-
   tbody.innerHTML = html;
 }
 
 
 // ============================================================
-//  Team Modal
+//  Team Modal — single game
 // ============================================================
 function openTeamModal(teamName, period, gameDateStr) {
   var teamKey = teamName.trim().toLowerCase();
@@ -916,11 +1114,37 @@ function openTeamModal(teamName, period, gameDateStr) {
     if (isNaN(d)) return false;
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) === gameDateStr;
   });
-
   members.sort(function (a, b) { return b.numericValue - a.numericValue; });
+  renderTeamModalBody(teamName, members);
+}
 
+// ============================================================
+//  Team Modal — Best of 2026 season
+// ============================================================
+function openBestOf2026TeamModal(teamName) {
+  var teamKey = teamName.trim().toLowerCase();
+
+  // Get season players for this team, deduplicated by student
+  var raw = allData.filter(function (r) {
+    if (r.teamMatchKey !== teamKey) return false;
+    if (!String(r.rawClassPeriod || '').toLowerCase().includes('2025-26')) return false;
+    var d = new Date(r.timestamp);
+    if (isNaN(d)) return false;
+    return d >= BEST_2026_START && d <= BEST_2026_END;
+  });
+
+  var best = {};
+  raw.forEach(function (r) {
+    var key = r.fullName.trim().toLowerCase();
+    if (!best[key] || r.numericValue > best[key].numericValue) best[key] = r;
+  });
+  var members = Object.values(best).sort(function (a, b) { return b.numericValue - a.numericValue; });
+  renderTeamModalBody(teamName, members);
+}
+
+function renderTeamModalBody(teamName, members) {
   var titleEl = document.getElementById('teamModalTitle');
-  if (titleEl) titleEl.textContent = teamName + ' — Team Roster';
+  if (titleEl) titleEl.textContent = toTitleCase(teamName) + ' — Team Roster';
 
   var tbody = document.getElementById('teamModalBody');
   if (!tbody) return;
@@ -939,6 +1163,5 @@ function openTeamModal(teamName, period, gameDateStr) {
     });
     tbody.innerHTML = html;
   }
-
   bootstrap.Modal.getOrCreateInstance(document.getElementById('teamModal')).show();
 }
