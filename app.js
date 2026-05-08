@@ -77,28 +77,24 @@ const CUSTOM_VIEWS = [
 window.addEventListener('DOMContentLoaded', function () {
   injectStyles();
 
-  var url = 'https://sheets.googleapis.com/v4/spreadsheets/'
-    + CONFIG.SHEET_ID
-    + '/values/'
-    + encodeURIComponent(CONFIG.TAB_NAME)
-    + '?key='
-    + CONFIG.API_KEY;
-
-  fetch(url)
+  // We call your Apps Script URL instead of the Google API
+  fetch(CONFIG.WEB_APP_URL)
     .then(function (res) {
-      if (!res.ok) throw new Error('Sheets API error: ' + res.status);
+      if (!res.ok) throw new Error('Backend error: ' + res.status);
       return res.json();
     })
     .then(function (json) {
-      var records = parseSheetData(json.values || []);
-      initializeDashboard(records);
+      if (json.error) {
+        showError(json.error);
+        return;
+      }
+      // Your Code.gs already returns "records", so we send them straight to the dashboard
+      initializeDashboard(json.records);
     })
     .catch(function (err) {
-      showError('Could not load data. ' + err.message
-        + ' — Make sure the sheet is set to "Anyone with the link can view" and the Google Sheets API is enabled.');
+      showError('Could not load data. ' + err.message);
     });
 });
-
 
 // ============================================================
 //  Inject CSS
