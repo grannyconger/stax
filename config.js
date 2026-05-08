@@ -5,5 +5,5 @@
 
 const CONFIG = {
   // Replace the URL below with the "Web App URL" you get in Step 2
-  WEB_APP_URL: "https://script.google.com/macros/s/AKfycbxlAACMKLlxD21XkBVFhm37kYaUhoAq0-cOSQlgKLMCBke0cJv_Wod4ldgCm6HSXy5q5w/exec"
+  WEB_APP_URL: "https://script.google.com/macros/s/AKfycbypMa2a72eQVJaF1TpUDW5ZK0UiVxTK9V4293tidzAcce9HS6GQCrvXRps8Srn_jkyi8w/exec"
 };
