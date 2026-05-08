@@ -4,7 +4,6 @@
 // ============================================================
 
 const CONFIG = {
-  SHEET_ID:  "14X4QYd9y-1763DPLKYNZBAN5P8VN3rEltKBJNGbekBY",
-  API_KEY:   "AIzaSyDDDkiONb6sEV95ocjiSV6Gn-VOIpVPZNs",
-  TAB_NAME:  "Reflections"
+  // Replace the URL below with the "Web App URL" you get in Step 2
+  WEB_APP_URL: "https://script.google.com/macros/s/AKfycbxlAACMKLlxD21XkBVFhm37kYaUhoAq0-cOSQlgKLMCBke0cJv_Wod4ldgCm6HSXy5q5w/exec"
 };
