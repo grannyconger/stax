@@ -15,11 +15,15 @@ let currentSortMode   = 'networth';
 let roiChartInstance  = null;
 let dedupEnabled      = true;
 
-const COMP_INV            = 214657.66;
-const BEST_2026_SENTINEL  = 'BEST_OF_2026_SEASON';
-const BEST_2026_START     = new Date('2026-01-01T00:00:00');
-const BEST_2026_END       = new Date('2026-06-01T23:59:59');
-const GAME_2026_KEYWORD   = '2025-26';
+// Filled from the backend payload — no hardcoded school year anywhere.
+let CLASSES_PRESENT = [];   // [{ label, raw, season }] newest season first
+let CUSTOM_VIEWS    = [];   // [{ name, periods[], performer, season }]
+let CURRENT_SEASON  = null; // e.g. 2027
+let SEASONS         = [];   // e.g. [2027, 2026, 2025, ...]
+
+// The computer opponent's fixed starting investment in Build Your Stax.
+const COMP_INV           = 214657.66;
+const SEASON_SENTINEL    = 'BEST_OF_SEASON';
 
 const ROI_BRACKETS = [
   { label: 'Lost Money', min: -Infinity, max: 0   },
@@ -29,46 +33,8 @@ const ROI_BRACKETS = [
   { label: '100%+',     min: 100,       max: Infinity }
 ];
 
-const CLASS_MAP = {
-  "2A PF 2022-23":             "2023 2A",
-  "4B PF 2022-23":             "2023 4B",
-  "3B PF 2023-24":             "2024 3B",
-  "4A PF 2023-24":             "2024 4A",
-  "4B PF 2023-24":             "2024 4B",
-  "3A PF 2024-25":             "2025 3A",
-  "4A PF 2024-25":             "2025 4A",
-  "4B PF 2024-25":             "2025 4B",
-  "2A MKT 2024-25":            "2025 Marketing",
-  "1A PF 2025-26 (Weaver)":   "2026 1A",
-  "2A PF 2025-26 (Weaver)":   "2026 2A",
-  "4B PF 2025-26 (Weaver)":   "2026 4B",
-  "3A PF 2025-26 (Robinson)": "2026 3A",
-  "4A PF 2025-26 (Robinson)": "2026 4A",
-  "2B PF 2025-26 (Robinson)": "2026 2B"
-};
+// CLASS_MAP and CUSTOM_VIEWS now come from the backend (see bootstrap below).
 
-const CUSTOM_VIEWS = [
-  { name: "BEST OF 2026",
-    periods: ["1a pf 2025-26 (weaver)","2a pf 2025-26 (weaver)","4b pf 2025-26 (weaver)",
-              "3a pf 2025-26 (robinson)","4a pf 2025-26 (robinson)","2b pf 2025-26 (robinson)"],
-    performer: null },
-  { name: "BEST OF 2025",
-    periods: ["3a pf 2024-25","4a pf 2024-25","4b pf 2024-25","2a mkt 2024-25"],
-    performer: null },
-  { name: "BEST OF 2024",
-    periods: ["3b pf 2023-24","4a pf 2023-24","4b pf 2023-24"],
-    performer: null },
-  { name: "BEST OF 2023",
-    periods: ["2a pf 2022-23","4b pf 2022-23"],
-    performer: null },
-  { name: "TOP SAVINGS ACCOUNT",        periods: [], performer: "savings account" },
-  { name: "TOP CERTIFICATE OF DEPOSIT", periods: [], performer: "certificate of deposit" },
-  { name: "TOP INDEX FUND",             periods: [], performer: "index fund" },
-  { name: "TOP INDIVIDUAL STOCKS",      periods: [], performer: "individual stocks" },
-  { name: "TOP GOVERNMENT BONDS",       periods: [], performer: "government bonds" },
-  { name: "TOP CROP COMMODITY",         periods: [], performer: "crop commodity" },
-  { name: "TOP GOLD",                   periods: [], performer: "gold" }
-];
 
 
 // ============================================================
@@ -88,8 +54,19 @@ window.addEventListener('DOMContentLoaded', function () {
         showError(json.error);
         return;
       }
-      // Your Code.gs already returns "records", so we send them straight to the dashboard
-      initializeDashboard(json.records);
+      // The backend is the single source of truth for classes and seasons.
+      // If an older Code.gs is still deployed, derive them here instead so
+      // the page keeps working either way.
+      var recs = json.records || [];
+      if (json.classes && json.classes.length) {
+        CLASSES_PRESENT = json.classes;
+        CUSTOM_VIEWS    = json.customViews   || [];
+        SEASONS         = json.seasons       || [];
+        CURRENT_SEASON  = json.currentSeason || (SEASONS.length ? SEASONS[0] : null);
+      } else {
+        deriveViewsFromRecords(recs);
+      }
+      initializeDashboard(recs);
     })
     .catch(function (err) {
       showError('Could not load data. ' + err.message);
@@ -128,7 +105,16 @@ function injectStyles() {
     '  border-color: var(--gold-dark) !important;',
     '}',
 
-    // ---- Overall leaderboard: 2026 stacked centered ----
+    // ---- Data-quality flag marker ----
+    '.data-flag {',
+    '  font-size: 0.85em;',
+    '  cursor: help;',
+    '  opacity: 0.9;',
+    '}',
+    '.data-flag-repaired    { color: #e8a838; }',
+    '.data-flag-unparseable { color: #e74c3c; }',
+
+    // ---- Overall leaderboard: current season, stacked centered ----
     '.overall-entry {',
     '  display: flex;',
     '  flex-direction: column;',
@@ -255,66 +241,6 @@ function injectStyles() {
 
 
 // ============================================================
-//  Parse raw Sheets API rows → record objects
-// ============================================================
-function parseSheetData(rows) {
-  if (!rows || rows.length < 2) return [];
-
-  var headers = rows[0].map(function (h) { return String(h).toLowerCase().trim(); });
-
-  var tIdx    = headers.indexOf("timestamp");
-  var fIdx    = headers.indexOf("first name");
-  var lIdx    = headers.indexOf("last name");
-  var cIdx    = headers.indexOf("class period");
-  var pIdx    = headers.indexOf("portfolio value");
-  var hIdx    = headers.indexOf("your highest performer");
-  var tiIdx   = headers.findIndex(function (h) { return h.includes("total invest"); });
-  var lpIdx   = headers.findIndex(function (h) { return h.includes("lowest performer"); });
-  var bmIdx   = headers.findIndex(function (h) { return h.includes("beat the market"); });
-  var cnIdx   = headers.findIndex(function (h) { return h.includes("computer"); });
-  var teamIdx = headers.findIndex(function (h) { return h.includes("team name"); });
-  var expIdx  = headers.findIndex(function (h) { return h.includes("expenses") || h.includes("life event"); });
-  var trIdx   = headers.findIndex(function (h) { return h.includes("total return"); });
-
-  if (fIdx === -1 || pIdx === -1) {
-    showError('Could not find required columns. Found: ' + headers.join(' | '));
-    return [];
-  }
-
-  var records = [];
-  for (var i = 1; i < rows.length; i++) {
-    var row  = rows[i];
-    var get  = function (idx) { return idx > -1 && row[idx] ? String(row[idx]).trim() : ''; };
-    var fName = get(fIdx);
-    var lName = get(lIdx);
-    if (!fName) continue;
-    var pVal = get(pIdx);
-    if (!pVal) continue;
-
-    var rawClass    = cIdx > -1 ? String(row[cIdx] || 'Unknown').trim() : 'Unknown';
-    var mappedClass = CLASS_MAP[rawClass] ? CLASS_MAP[rawClass] : rawClass;
-
-    records.push({
-      timestamp:              get(tIdx),
-      fullName:               toTitleCase((fName + ' ' + lName).trim()),
-      classPeriod:            mappedClass,
-      rawClassPeriod:         rawClass,
-      portfolioValue:         pVal,
-      totalInvested:          tiIdx   > -1 ? get(tiIdx)   : 'N/A',
-      expensesFromLifeEvents: expIdx  > -1 ? get(expIdx)  : 'N/A',
-      totalReturn:            trIdx   > -1 ? get(trIdx)   : 'N/A',
-      highestPerformer:       hIdx    > -1 ? get(hIdx)    : 'None',
-      lowestPerformer:        lpIdx   > -1 ? get(lpIdx)   : 'None',
-      beatMarket:             bmIdx   > -1 ? get(bmIdx)   : 'No',
-      computerNetWorth:       cnIdx   > -1 ? get(cnIdx)   : 'N/A',
-      teamName:               teamIdx > -1 ? get(teamIdx) : 'No Team'
-    });
-  }
-  return records;
-}
-
-
-// ============================================================
 //  Error Display
 // ============================================================
 function showError(msg) {
@@ -328,6 +254,7 @@ function showError(msg) {
 // ============================================================
 function safeNum(val) {
   if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return isFinite(val) ? val : 0;
   var n = parseFloat(String(val).replace(/[^0-9.-]+/g, ''));
   return isNaN(n) ? 0 : n;
 }
@@ -346,6 +273,96 @@ function formatDate(ts) {
 
 function toTitleCase(str) {
   return String(str || '').toLowerCase().replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+}
+
+/**
+ * Fallback for an older backend that sends only "records".
+ * Works out each class's label and school year from its raw name, so the
+ * dropdown and the season views still build correctly.
+ */
+function deriveClassInfo(raw) {
+  var s = String(raw || '').trim();
+  var m = s.match(/([0-9][AB])\b/i);
+  var period = m ? m[1].toUpperCase() : null;
+
+  var y = s.match(/(\d{4})\s*-\s*(\d{2,4})/);
+  var season = null;
+  if (y) {
+    season = y[2].length === 2 ? parseInt(String(y[1]).substring(0, 2) + y[2], 10)
+                               : parseInt(y[2], 10);
+  }
+  var isMkt = /\bmkt\b|marketing/i.test(s);
+
+  if (season && period) return { label: season + ' ' + (isMkt ? 'Marketing' : period), season: season };
+  if (season && isMkt)  return { label: season + ' Marketing', season: season };
+  return { label: s, season: season };
+}
+
+function deriveViewsFromRecords(recs) {
+  var seasonSet = {}, seen = {};
+  CLASSES_PRESENT = [];
+
+  recs.forEach(function (r) {
+    var raw = r.rawClassPeriod || r.classPeriod || 'Unknown';
+    var info = deriveClassInfo(raw);
+    // Keep whatever label the backend already produced, if it gave one
+    if (r.classPeriod && r.classPeriod !== raw) info.label = r.classPeriod;
+    r.classPeriod = info.label;
+    r.season      = info.season;
+    if (info.season) seasonSet[info.season] = true;
+    if (!seen[info.label]) {
+      seen[info.label] = true;
+      CLASSES_PRESENT.push({ label: info.label, raw: raw, season: info.season });
+    }
+  });
+
+  SEASONS = Object.keys(seasonSet).map(Number).sort(function (a, b) { return b - a; });
+  CURRENT_SEASON = SEASONS.length ? SEASONS[0] : null;
+
+  CUSTOM_VIEWS = [];
+  SEASONS.forEach(function (yr) {
+    var periods = [];
+    recs.forEach(function (r) {
+      if (r.season === yr) {
+        var rp = String(r.rawClassPeriod || '').toLowerCase();
+        if (rp && periods.indexOf(rp) === -1) periods.push(rp);
+      }
+    });
+    CUSTOM_VIEWS.push({ name: 'BEST OF ' + yr, periods: periods, performer: null, season: yr });
+  });
+  ['savings account', 'certificate of deposit', 'index fund', 'individual stocks',
+   'government bonds', 'crop commodity', 'gold'].forEach(function (p) {
+    CUSTOM_VIEWS.push({ name: 'TOP ' + p.toUpperCase(), periods: [], performer: p, season: null });
+  });
+
+  CLASSES_PRESENT.sort(function (a, b) {
+    if (a.season !== b.season) return (b.season || 0) - (a.season || 0);
+    return a.label < b.label ? -1 : 1;
+  });
+}
+
+/** Records from the newest season present in the data. */
+function currentSeasonRecords() {
+  if (CURRENT_SEASON === null || CURRENT_SEASON === undefined) return [];
+  return allData.filter(function (r) { return r.season === CURRENT_SEASON; });
+}
+
+/** Rows whose portfolio/invested figures could not be read are excluded
+ *  from averages, rankings and charts, but still shown so they can be fixed. */
+function isScorable(r) {
+  return r.dataFlag !== 'unparseable';
+}
+
+/** Small warning marker shown beside a value that needed interpretation. */
+function flagMarker(r) {
+  if (!r || !r.dataFlag) return '';
+  var title = r.dataFlag === 'unparseable'
+    ? 'Entry could not be read' + (r.sheetRow ? ' (sheet row ' + r.sheetRow + ')' : '') +
+      '. Excluded from averages and ranking.'
+    : 'Entry was reformatted from a malformed value' +
+      (r.sheetRow ? ' (sheet row ' + r.sheetRow + ')' : '') + '. Worth verifying.';
+  return ' <span class="data-flag data-flag-' + r.dataFlag + '" title="' +
+         escHtml(title) + '">&#9888;</span>';
 }
 
 function escHtml(str) {
@@ -390,10 +407,13 @@ function initializeDashboard(records) {
 
   // Pre-compute numeric fields
   allData.forEach(function (row) {
+    // The backend now sends real numbers. safeNum stays as a safety net so an
+    // older cached payload of strings still works.
     row.numericValue         = safeNum(row.portfolioValue);
     row.totalInvestedNumeric = safeNum(row.totalInvested);
     row.expensesNumeric      = safeNum(row.expensesFromLifeEvents);
     row.totalReturnNumeric   = safeNum(row.totalReturn);
+    if (row.season === undefined) row.season = null;
 
     row.roi = row.totalInvestedNumeric > 0
       ? ((row.numericValue - row.totalInvestedNumeric) / row.totalInvestedNumeric) * 100
@@ -505,26 +525,39 @@ function populateDropdowns() {
   var selectIndiv = document.getElementById('classFilter');
   if (selectIndiv) {
     selectIndiv.innerHTML = '';
-    var exactOrder = [
-      'ALL TIME RECORDS',
-      'BEST OF 2026', '2026 1A', '2026 2A', '2026 3A', '2026 4A', '2026 2B', '2026 4B',
-      'TOP SAVINGS ACCOUNT', 'TOP CERTIFICATE OF DEPOSIT', 'TOP INDEX FUND',
-      'TOP INDIVIDUAL STOCKS', 'TOP GOVERNMENT BONDS', 'TOP CROP COMMODITY', 'TOP GOLD',
-      'BEST OF 2025', '2025 3A', '2025 4A', '2025 4B', '2025 Marketing',
-      'BEST OF 2024', '2024 4A', '2024 3B', '2024 4B',
-      'BEST OF 2023', '2023 2A', '2023 4B'
-    ];
-    exactOrder.forEach(function (viewName) {
-      var opt      = document.createElement('option');
-      var isCustom = CUSTOM_VIEWS.some(function (v) { return v.name === viewName; });
-      if (viewName === 'ALL TIME RECORDS') {
-        opt.value = 'ALL TIME'; opt.textContent = '🏆 ALL TIME RECORDS';
-      } else {
-        opt.value       = isCustom ? 'CUSTOM_' + viewName : viewName;
-        opt.textContent = viewName.includes('BEST OF') ? '⭐ ' + viewName : viewName;
-      }
+
+    var addOpt = function (value, text) {
+      var opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = text;
       selectIndiv.appendChild(opt);
+    };
+
+    addOpt('ALL TIME', '🏆 ALL TIME RECORDS');
+
+    // Newest season first, each followed by its class periods.
+    // The asset ("TOP ...") views sit under the current season, as before.
+    SEASONS.forEach(function (yr, seasonIdx) {
+      var bestName = 'BEST OF ' + yr;
+      if (CUSTOM_VIEWS.some(function (v) { return v.name === bestName; })) {
+        addOpt('CUSTOM_' + bestName, '⭐ ' + bestName);
+      }
+
+      CLASSES_PRESENT
+        .filter(function (c) { return c.season === yr; })
+        .forEach(function (c) { addOpt(c.label, c.label); });
+
+      if (seasonIdx === 0) {
+        CUSTOM_VIEWS
+          .filter(function (v) { return v.performer; })
+          .forEach(function (v) { addOpt('CUSTOM_' + v.name, v.name); });
+      }
     });
+
+    // Any class whose season could not be determined
+    CLASSES_PRESENT
+      .filter(function (c) { return SEASONS.indexOf(c.season) === -1; })
+      .forEach(function (c) { addOpt(c.label, c.label); });
   }
 
   var validGameSet = new Set();
@@ -545,16 +578,27 @@ function populateDropdowns() {
   var selectGame = document.getElementById('gameFilter');
   if (selectGame) {
     selectGame.innerHTML = '';
-    var bestOpt = document.createElement('option');
-    bestOpt.value       = BEST_2026_SENTINEL;
-    bestOpt.textContent = '⭐ BEST OF 2026 (Season)';
-    selectGame.appendChild(bestOpt);
+    if (CURRENT_SEASON) {
+      var bestOpt = document.createElement('option');
+      bestOpt.value       = SEASON_SENTINEL;
+      bestOpt.textContent = '⭐ BEST OF ' + CURRENT_SEASON + ' (Season)';
+      selectGame.appendChild(bestOpt);
+    }
 
     uniqueGamesGlobal.forEach(function (g) {
       var opt = document.createElement('option');
       opt.value = g; opt.textContent = g;
       selectGame.appendChild(opt);
     });
+
+    // If the current season has no team entries yet (normal early in the
+    // year), open on the most recent game that does, so the tab is not blank.
+    var seasonHasTeams = currentSeasonRecords().some(function (r) {
+      return r.teamMatchKey !== 'none' && isScorable(r);
+    });
+    if (!seasonHasTeams && uniqueGamesGlobal.length > 0) {
+      selectGame.value = uniqueGamesGlobal[0];
+    }
   }
 }
 
@@ -637,7 +681,7 @@ function updateLeaderboard() {
   var filterValue = filterEl.value;
   var searchTerm  = searchEl ? searchEl.value.trim().toLowerCase() : '';
 
-  var filtered = getFilteredRecords(filterValue);
+  var filtered = getFilteredRecords(filterValue).filter(isScorable);
   if (dedupEnabled) filtered = deduplicateRecords(filtered);
 
   if (searchTerm) {
@@ -677,7 +721,7 @@ function updateLeaderboard() {
     // col 1: rank
     html += '<td class="rank-col">' + medal + '</td>';
     // col 2: name
-    html += '<td><strong>' + escHtml(row.fullName) + '</strong>' + star + '</td>';
+    html += '<td><strong>' + escHtml(row.fullName) + '</strong>' + star + flagMarker(row) + '</td>';
     // col 3: period
     html += '<td>' + escHtml(row.classPeriod) + '</td>';
     // col 4: portfolio + ROI (ROI hidden on mobile via CSS)
@@ -694,6 +738,7 @@ function updateLeaderboard() {
 }
 
 function updateIndivStats(filtered) {
+  filtered = filtered.filter(isScorable);
   var avgEl = document.getElementById('statAvgVal');
   if (avgEl) {
     if (filtered.length === 0) {
@@ -732,7 +777,8 @@ function openPlayerModal(filteredIdx, allDataIndexes) {
 
   var set = function (id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
 
-  set('modalName',        row.fullName);
+  var nameEl = document.getElementById('modalName');
+  if (nameEl) nameEl.innerHTML = escHtml(row.fullName) + flagMarker(row);
   set('modalPortfolio',   formatCurrency(row.numericValue));
   set('modalInvested',    row.totalInvestedNumeric  > 0  ? formatCurrency(row.totalInvestedNumeric)  : 'N/A');
   set('modalExpenses',    row.expensesNumeric        > 0  ? formatCurrency(row.expensesNumeric)        : 'N/A');
@@ -783,9 +829,8 @@ function renderGameView() {
 // ---- Global Stats ----
 function renderGlobalStats() {
   // Win rate — 2026 only
-  var cohort2026 = allData.filter(function (r) {
-    return String(r.rawClassPeriod || '').toLowerCase().includes('2025-26');
-  });
+  var cohort2026 = currentSeasonRecords();
+  cohort2026 = cohort2026.filter(isScorable);
   var winRateEl = document.getElementById('gameStatWinRate');
   if (winRateEl) {
     if (cohort2026.length === 0) {
@@ -797,9 +842,8 @@ function renderGlobalStats() {
   }
 
   // Overall leaderboard: 2026 only, stacked centered layout
-  var data2026  = allData.filter(function (r) {
-    return String(r.rawClassPeriod || '').toLowerCase().includes('2025-26');
-  });
+  var data2026  = currentSeasonRecords();
+  data2026 = data2026.filter(isScorable);
   var sorted    = (dedupEnabled ? deduplicateRecords(data2026) : data2026.slice())
     .sort(function (a, b) { return b.numericValue - a.numericValue; });
 
@@ -829,7 +873,7 @@ function renderGlobalStats() {
   if (gapEl) {
     var maxGap = 0;
     var pm     = {};
-    allData.forEach(function (r) {
+    allData.filter(isScorable).forEach(function (r) {
       if (!pm[r.classPeriod]) pm[r.classPeriod] = [];
       pm[r.classPeriod].push(r.numericValue);
     });
@@ -844,12 +888,10 @@ function renderGlobalStats() {
 
 // ---- Game leaderboard: 2026 only ----
 function renderGameLeaderboard() {
-  var data2026 = allData.filter(function (r) {
-    return String(r.rawClassPeriod || '').toLowerCase().includes(GAME_2026_KEYWORD);
-  });
+  var data2026 = currentSeasonRecords();
 
   var periodMap = {};
-  data2026.forEach(function (r) {
+  data2026.filter(isScorable).forEach(function (r) {
     var key = r.classPeriod || 'Unknown';
     if (!periodMap[key]) periodMap[key] = [];
     periodMap[key].push(r);
@@ -874,7 +916,7 @@ function renderGameLeaderboard() {
   if (!tbody) return;
 
   if (games.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No 2026 game data found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No ' + (CURRENT_SEASON || '') + ' game data found.</td></tr>';
     return;
   }
 
@@ -909,7 +951,7 @@ function renderROIChart() {
   var counts = ROI_BRACKETS.map(function () { return 0; });
   var valid  = 0;
 
-  allData.forEach(function (r) {
+  allData.filter(isScorable).forEach(function (r) {
     if (r.totalInvestedNumeric <= 0) return;
     valid++;
     for (var i = 0; i < ROI_BRACKETS.length; i++) {
@@ -976,7 +1018,7 @@ function openGameModal(period) {
     players.forEach(function (r) {
       var star = r.beatMarketBool ? ' ⭐' : '';
       html += '<tr>';
-      html += '<td class="list-player-text"><strong>' + escHtml(r.fullName) + '</strong>' + star + '</td>';
+      html += '<td class="list-player-text"><strong>' + escHtml(r.fullName) + '</strong>' + star + flagMarker(r) + '</td>';
       html += '<td class="currency" style="text-shadow:none;color:var(--olive-dark)!important;">' + formatCurrency(r.numericValue) + '</td>';
       html += '<td><span class="badge ' + getAssetBadgeClass(r.highestPerformer) + '">' + escHtml(getAssetLabel(r.highestPerformer)) + '</span></td>';
       html += '</tr>';
@@ -1000,7 +1042,7 @@ function renderTeamView() {
   }
 
   var selectedGame = gameFilterEl.value;
-  if (selectedGame === BEST_2026_SENTINEL) { renderBestOf2026Teams(); return; }
+  if (selectedGame === SEASON_SENTINEL) { renderBestOfSeasonTeams(); return; }
 
   if (!selectedGame || uniqueGamesGlobal.length === 0) {
     if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No team data found.</td></tr>';
@@ -1021,14 +1063,10 @@ function renderTeamView() {
   renderTeamTable(gamePlayers, gamePeriod, gameDateStr);
 }
 
-function renderBestOf2026Teams() {
+function renderBestOfSeasonTeams() {
   var tbody = document.getElementById('teamLeaderboardBody');
-  var seasonPlayers = allData.filter(function (r) {
-    if (r.teamMatchKey === 'none') return false;
-    if (!String(r.rawClassPeriod || '').toLowerCase().includes('2025-26')) return false;
-    var d = new Date(r.timestamp);
-    if (isNaN(d)) return false;
-    return d >= BEST_2026_START && d <= BEST_2026_END;
+  var seasonPlayers = currentSeasonRecords().filter(function (r) {
+    return r.teamMatchKey !== 'none' && isScorable(r);
   });
 
   var teamMap = {};
@@ -1052,7 +1090,7 @@ function renderBestOf2026Teams() {
   if (!tbody) return;
 
   if (teams.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No team data found for the 2026 season.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center" style="color:rgba(244,241,234,0.5);padding:30px;">No team data found for the ' + (CURRENT_SEASON || '') + ' season.</td></tr>';
     return;
   }
 
@@ -1064,7 +1102,7 @@ function renderBestOf2026Teams() {
       .slice().sort(function (a, b) { return b.numericValue - a.numericValue; })
       .map(function (r) { return escHtml(r.fullName); }).join(', ');
 
-    html += '<tr onclick="openBestOf2026TeamModal(\'' + escHtml(team.displayName) + '\')">';
+    html += '<tr onclick="openBestOfSeasonTeamModal(\'' + escHtml(team.displayName) + '\')">';
     html += '<td class="rank-col">' + medal + '</td>';
     html += '<td><strong>' + escHtml(team.displayName) + '</strong></td>';
     html += '<td><small style="line-height:1.8;">' + memberNames + '</small></td>';
@@ -1076,7 +1114,7 @@ function renderBestOf2026Teams() {
 
 function renderTeamTable(gamePlayers, gamePeriod, gameDateStr) {
   var teamMap = {};
-  gamePlayers.forEach(function (r) {
+  gamePlayers.filter(isScorable).forEach(function (r) {
     if (r.teamMatchKey === 'none') return;
     if (!teamMap[r.teamMatchKey]) teamMap[r.teamMatchKey] = { displayName: r.teamName.trim(), members: [] };
     teamMap[r.teamMatchKey].members.push(r);
@@ -1132,14 +1170,10 @@ function openTeamModal(teamName, period, gameDateStr) {
   renderTeamModalBody(teamName, members);
 }
 
-function openBestOf2026TeamModal(teamName) {
+function openBestOfSeasonTeamModal(teamName) {
   var teamKey = teamName.trim().toLowerCase();
-  var raw = allData.filter(function (r) {
-    if (r.teamMatchKey !== teamKey) return false;
-    if (!String(r.rawClassPeriod || '').toLowerCase().includes('2025-26')) return false;
-    var d = new Date(r.timestamp);
-    if (isNaN(d)) return false;
-    return d >= BEST_2026_START && d <= BEST_2026_END;
+  var raw = currentSeasonRecords().filter(function (r) {
+    return r.teamMatchKey === teamKey;
   });
   var best = {};
   raw.forEach(function (r) {
